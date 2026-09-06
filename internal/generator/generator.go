@@ -2,18 +2,40 @@
 package generator
 
 import (
+	"context"
+	"fmt"
 	"time"
 
 	"streamforge/internal/event"
 )
 
-// Generate produces a single synthetic event and sends it to out.
-// This is the walking-skeleton version: one call, one event.
-func Generate(out chan<- event.Event) {
-	out <- event.Event{
-		ID:        "evt-1",
-		Type:      event.TypeUserAction,
-		Payload:   map[string]any{"action": "click"},
-		Timestamp: time.Now(),
+var types = []event.Type{event.TypeError, event.TypePayment, event.TypeUserAction}
+
+// Run continuously produces synthetic events and sends them to out, one
+// every interval, until ctx is canceled. It cycles through event types so
+// downstream classification has something to distinguish.
+func Run(ctx context.Context, out chan<- event.Event, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	var seq int
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			seq++
+			evt := event.Event{
+				ID:        fmt.Sprintf("evt-%d", seq),
+				Type:      types[seq%len(types)],
+				Payload:   map[string]any{"seq": seq},
+				Timestamp: time.Now(),
+			}
+			select {
+			case out <- evt:
+			case <-ctx.Done():
+				return
+			}
+		}
 	}
 }
