@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"streamforge/internal/event"
 )
@@ -40,10 +41,19 @@ func (c *Counts) Snapshot() map[event.Type]int64 {
 	return snap
 }
 
+// Recorder receives the end-to-end latency of a processed event. Defined
+// here (rather than depending on the metrics package) so worker has no
+// import on metrics — metrics depends on worker for Counts, and a
+// reverse dependency would be a cycle.
+type Recorder interface {
+	RecordProcessed(latency time.Duration)
+}
+
 // StartPool launches n worker goroutines that read from in, classify each
-// event, and update counts, until ctx is canceled or in is closed. It
-// registers each goroutine on wg so callers can wait for a clean shutdown.
-func StartPool(ctx context.Context, wg *sync.WaitGroup, in <-chan event.Event, n int, counts *Counts) {
+// event, update counts, and report latency to rec, until ctx is canceled
+// or in is closed. It registers each goroutine on wg so callers can wait
+// for a clean shutdown.
+func StartPool(ctx context.Context, wg *sync.WaitGroup, in <-chan event.Event, n int, counts *Counts, rec Recorder) {
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func(workerID int) {
@@ -56,14 +66,15 @@ func StartPool(ctx context.Context, wg *sync.WaitGroup, in <-chan event.Event, n
 					if !ok {
 						return
 					}
-					process(workerID, evt, counts)
+					process(workerID, evt, counts, rec)
 				}
 			}
 		}(i)
 	}
 }
 
-func process(workerID int, evt event.Event, counts *Counts) {
+func process(workerID int, evt event.Event, counts *Counts, rec Recorder) {
 	counts.inc(evt.Type)
+	rec.RecordProcessed(time.Since(evt.Timestamp))
 	fmt.Printf("[worker %d] processed event: id=%s type=%s\n", workerID, evt.ID, evt.Type)
 }
