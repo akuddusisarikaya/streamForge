@@ -11,10 +11,16 @@ import (
 
 var types = []event.Type{event.TypeError, event.TypePayment, event.TypeUserAction}
 
-// Run continuously produces synthetic events and sends them to out, one
-// every interval, until ctx is canceled. It cycles through event types so
-// downstream classification has something to distinguish.
-func Run(ctx context.Context, out chan<- event.Event, interval time.Duration) {
+// sender is the subset of ingestion.Buffer that Run depends on, so the
+// blocking-send (backpressure) behavior lives in one place: ingestion.
+type sender interface {
+	Send(ctx context.Context, evt event.Event) bool
+}
+
+// Run continuously produces synthetic events and sends them to buf, one
+// every interval, until ctx is canceled. If buf is full, Send blocks —
+// that's the backpressure signal propagating upstream to the generator.
+func Run(ctx context.Context, buf sender, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -31,9 +37,7 @@ func Run(ctx context.Context, out chan<- event.Event, interval time.Duration) {
 				Payload:   map[string]any{"seq": seq},
 				Timestamp: time.Now(),
 			}
-			select {
-			case out <- evt:
-			case <-ctx.Done():
+			if !buf.Send(ctx, evt) {
 				return
 			}
 		}

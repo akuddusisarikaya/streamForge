@@ -29,7 +29,7 @@ func main() {
 	counts := worker.NewCounts()
 
 	var wg sync.WaitGroup
-	worker.StartPool(ctx, &wg, buffer, *numWorkers, counts)
+	worker.StartPool(ctx, &wg, buffer.Chan(), *numWorkers, counts)
 
 	wg.Add(1)
 	go func() {
@@ -45,4 +45,7 @@ func main() {
 	for t, n := range counts.Snapshot() {
 		fmt.Printf("  %s: %d\n", t, n)
 	}
+
+	bs := buffer.Stats()
+	fmt.Printf("backpressure: %d blocked sends, %s total blocked time\n", bs.BlockedSends, bs.BlockedTotal)
 }
