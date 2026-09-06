@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -23,9 +24,9 @@ import (
 func main() {
 	numWorkers := flag.Int("workers", 4, "number of parallel workers")
 	bufferSize := flag.Int("buffer", 10, "ingestion buffer capacity")
-	interval := flag.Duration("interval", 200*time.Millisecond, "delay between generated events")
+	rate := flag.Int64("rate", 20, "initial generator rate, in events per second")
 	metricsInterval := flag.Duration("metrics-interval", 1*time.Second, "how often to sample and print metrics")
-	addr := flag.String("addr", ":8080", "address to serve /stats on")
+	addr := flag.String("addr", ":8080", "address to serve /stats and /rate on")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -33,8 +34,9 @@ func main() {
 
 	buffer := ingestion.NewBuffer(*bufferSize)
 	counts := worker.NewCounts()
+	rateController := generator.NewRateController(*rate)
 	recorder := metrics.NewRecorder()
-	reporter := metrics.NewReporter(recorder, buffer, counts, *metricsInterval)
+	reporter := metrics.NewReporter(recorder, buffer, counts, rateController, *metricsInterval)
 
 	var wg sync.WaitGroup
 	worker.StartPool(ctx, &wg, buffer.Chan(), *numWorkers, counts, recorder)
@@ -42,7 +44,7 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		generator.Run(ctx, buffer, *interval)
+		generator.Run(ctx, buffer, rateController)
 	}()
 
 	wg.Add(1)
@@ -53,12 +55,13 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle("/stats", reporter.Handler())
+	mux.HandleFunc("/rate", rateHandler(rateController))
 	server := &http.Server{Addr: *addr, Handler: mux}
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		fmt.Printf("serving /stats on %s\n", *addr)
+		fmt.Printf("serving /stats and /rate on %s\n", *addr)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("stats server error: %v", err)
 		}
@@ -80,4 +83,27 @@ func main() {
 
 	bs := buffer.Stats()
 	fmt.Printf("backpressure: %d blocked sends, %s total blocked time\n", bs.BlockedSends, bs.BlockedTotal)
+}
+
+// rateHandler serves the generator's current target rate on GET, and
+// updates it on POST (?value=N), so load can be ramped up live without
+// restarting the process.
+func rateHandler(rc *generator.RateController) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodGet:
+			fmt.Fprintf(w, `{"rate_per_sec":%d}`, rc.Rate())
+		case http.MethodPost:
+			n, err := strconv.ParseInt(r.URL.Query().Get("value"), 10, 64)
+			if err != nil || n <= 0 {
+				http.Error(w, `{"error":"value must be a positive integer"}`, http.StatusBadRequest)
+				return
+			}
+			rc.SetRate(n)
+			fmt.Fprintf(w, `{"rate_per_sec":%d}`, n)
+		default:
+			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		}
+	}
 }

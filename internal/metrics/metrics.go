@@ -41,6 +41,7 @@ func (r *Recorder) RecordProcessed(latency time.Duration) {
 // /stats JSON response.
 type Snapshot struct {
 	Timestamp                time.Time        `json:"timestamp"`
+	TargetRatePerSec         int64            `json:"target_rate_per_sec"`
 	ThroughputPerSec         float64          `json:"throughput_per_sec"`
 	AvgLatencyMs             float64          `json:"avg_latency_ms"`
 	QueueLength              int              `json:"queue_length"`
@@ -48,6 +49,13 @@ type Snapshot struct {
 	CountsByType             map[string]int64 `json:"counts_by_type"`
 	BackpressureBlockedSends int64            `json:"backpressure_blocked_sends"`
 	BackpressureBlockedMs    float64          `json:"backpressure_blocked_ms"`
+}
+
+// rateProvider is satisfied by *generator.RateController. Defined locally
+// (rather than importing generator) so metrics doesn't take on a
+// dependency it only needs one method from.
+type rateProvider interface {
+	Rate() int64
 }
 
 // Reporter periodically samples a Recorder, an ingestion.Buffer, and
@@ -62,6 +70,7 @@ type Reporter struct {
 	recorder *Recorder
 	buffer   *ingestion.Buffer
 	counts   *worker.Counts
+	rate     rateProvider
 	interval time.Duration
 
 	mu     sync.RWMutex
@@ -73,11 +82,12 @@ type Reporter struct {
 }
 
 // NewReporter creates a Reporter that samples every interval.
-func NewReporter(r *Recorder, buf *ingestion.Buffer, counts *worker.Counts, interval time.Duration) *Reporter {
+func NewReporter(r *Recorder, buf *ingestion.Buffer, counts *worker.Counts, rate rateProvider, interval time.Duration) *Reporter {
 	return &Reporter{
 		recorder:   r,
 		buffer:     buf,
 		counts:     counts,
+		rate:       rate,
 		interval:   interval,
 		lastSample: time.Now(),
 	}
@@ -131,6 +141,7 @@ func (rep *Reporter) sample() {
 
 	snap := Snapshot{
 		Timestamp:                now,
+		TargetRatePerSec:         rep.rate.Rate(),
 		ThroughputPerSec:         throughput,
 		AvgLatencyMs:             avgLatencyMs,
 		QueueLength:              rep.buffer.Len(),
@@ -144,8 +155,8 @@ func (rep *Reporter) sample() {
 	rep.latest = snap
 	rep.mu.Unlock()
 
-	fmt.Printf("[metrics] throughput=%.1f/s avg_latency=%.2fms queue=%d/%d counts=%v blocked_sends=%d blocked_ms=%.1f\n",
-		snap.ThroughputPerSec, snap.AvgLatencyMs, snap.QueueLength, snap.QueueCapacity,
+	fmt.Printf("[metrics] target=%d/s throughput=%.1f/s avg_latency=%.2fms queue=%d/%d counts=%v blocked_sends=%d blocked_ms=%.1f\n",
+		snap.TargetRatePerSec, snap.ThroughputPerSec, snap.AvgLatencyMs, snap.QueueLength, snap.QueueCapacity,
 		snap.CountsByType, snap.BackpressureBlockedSends, snap.BackpressureBlockedMs)
 }
 

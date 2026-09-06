@@ -10,10 +10,6 @@ import (
 	"streamforge/internal/event"
 )
 
-// blockedThreshold is the minimum wait before a send counts as
-// "backpressure applied" rather than noise from normal scheduling.
-const blockedThreshold = time.Millisecond
-
 // Buffer is a channel-based, bounded queue between the generator and the
 // worker pool. When full, Send blocks the caller instead of dropping
 // events: StreamForge's core requirement is not losing data, so a slow
@@ -36,13 +32,24 @@ func NewBuffer(capacity int) *Buffer {
 // Send enqueues evt, blocking if the buffer is full. It returns false only
 // if ctx is canceled while waiting, so callers can stop cleanly on
 // shutdown instead of blocking forever.
+//
+// It tries a non-blocking send first and only falls into the timed,
+// blocking path when the buffer was actually full. An arbitrary time
+// threshold ("count it as blocked past 1ms") would hide the many
+// sub-millisecond waits that show up at high throughput - checking
+// buffer-full directly instead of timing everything gives an exact count
+// of genuine backpressure events, however short.
 func (b *Buffer) Send(ctx context.Context, evt event.Event) bool {
+	select {
+	case b.ch <- evt:
+		return true
+	default:
+	}
+
 	start := time.Now()
 	select {
 	case b.ch <- evt:
-		if waited := time.Since(start); waited >= blockedThreshold {
-			b.stats.recordBlocked(waited)
-		}
+		b.stats.recordBlocked(time.Since(start))
 		return true
 	case <-ctx.Done():
 		return false
